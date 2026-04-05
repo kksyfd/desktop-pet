@@ -1,0 +1,22 @@
+{
+    "paths": {
+        "model_json": "img/AMS/shouer9.model3.json",
+        "physics_json": "img/AMS/shouer9.physics3.json",
+        "moc3_file": "img/AMS/shouer9.moc3",
+        "texture_folder": "img/AMS/shouer9.2048",
+        "hand_folder": "img/AMS/hand",
+        "keybind_json": "img/AMS/keybind.json",
+        "zm_folder": "img/AMS/zm",
+        "zm_keybind_json": "img/AMS/zm_keybind.json",
+        "expressions": [
+            "img/AMS/expression1.exp3.json",
+            "img/AMS/expression2.exp3.json",
+            "img/AMS/expression3.exp3.json",
+			"img/AMS/expression4.exp3.json",
+			"img/AMS/expression5.exp3.json",
+			"img/AMS/expression6.exp3.json",
+			"img/AMS/expression7.exp3.json",
+			"img/AMS/expression8.exp3.json"
+        ]
+    }
+}
