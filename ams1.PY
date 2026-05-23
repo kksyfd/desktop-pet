@@ -1,6 +1,6 @@
 
 # 创建完整的 AMS.py 包含头顶对话框系统
-complete_code = '''#!/usr/bin/env python3
+#complete_code = '''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-'''
 import sys
 print(f"[Python] 版本: {sys.version}")
@@ -12,10 +12,16 @@ import time
 import random
 import json
 from pathlib import Path
+from tianqi_huaban import WeatherBoardGL
+from tianqiapi import ip, shuju_1, ma, shuju_2
+from peizhi import ConfigManager
+from jianting import InputListenerManager
+from caidan import TrayManager
+from dingshi import AutoExpressionScheduler
 
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
 
-from PyQt5.QtWidgets import QApplication, QWidget, QDesktopWidget, QSystemTrayIcon, QMenu, QAction, QOpenGLWidget
+from PyQt5.QtWidgets import QApplication, QWidget, QDesktopWidget, QSystemTrayIcon, QMenu, QAction, QOpenGLWidget,QActionGroup
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QPainter, QCursor, QIcon, QPixmap, QColor, QFont
 from OpenGL.GL import *
@@ -35,7 +41,6 @@ def get_app_path():
 APP_PATH = get_app_path()
 print(f"[Path] 应用路径: {APP_PATH}")
 
-os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
 
 # ========== pynput 导入 ==========
 PYNPUT_AVAILABLE = False
@@ -52,6 +57,40 @@ except Exception as e:
 print("=" * 60)
 print("Live2D桌宠 - 头顶对话框版")
 print("=" * 60)
+
+# ========== 新增：追踪模式配置系统 ==========
+class TrackingConfig:
+    """追踪模式配置"""
+    def __init__(self):
+        # 默认配置：鼠标键盘都开，Z轴关
+        self.mouse_x = True      # 鼠标X轴追踪
+        self.mouse_y = True      # 鼠标Y轴追踪
+        self.keyboard_x = True  # 键盘/右手X轴追踪  
+        self.keyboard_y = True  # 键盘/右手Y轴追踪
+        self.z_animation = False  # Z轴摇摆动画
+        
+    @classmethod
+    def from_dict(cls, config_dict):
+        """从字典创建配置"""
+        cfg = cls()
+        if config_dict:
+            cfg.mouse_x = config_dict.get('mouse_x', True)
+            cfg.mouse_y = config_dict.get('mouse_y', True)
+            cfg.keyboard_x = config_dict.get('keyboard_x', True)
+            cfg.keyboard_y = config_dict.get('keyboard_y', True)
+            cfg.z_animation = config_dict.get('z_animation', False)
+        return cfg
+    
+    def is_mouse_active(self):
+        """鼠标是否有任何轴激活"""
+        return self.mouse_x or self.mouse_y
+    
+    def is_keyboard_active(self):
+        """键盘是否有任何轴激活"""
+        return self.keyboard_x or self.keyboard_y
+
+
+
 
 
 class KeyboardWorker(QObject):
@@ -122,33 +161,8 @@ class KeyboardWorker(QObject):
             self.listener.stop()
 
 
-class ZMWorker(QObject):
-    """头顶对话框工作器（全局键盘监听）"""
-    key_pressed_signal = pyqtSignal(str)
-    key_released_signal = pyqtSignal(str)
-    
-    def __init__(self, valid_keys):
-        super().__init__()
-        self.listener = None
-        self.pressed_keys = set()
-        self.valid_keys = set(valid_keys)
-        
-    def start_listening(self):
-        global PYNPUT_AVAILABLE, pynput_keyboard
-        
-        if not PYNPUT_AVAILABLE or pynput_keyboard is None:
-            print("[ZM] ❌ pynput 不可用")
-            return
-            
-        try:
-            self.listener = pynput_keyboard.Listener(
-                on_press=self.on_key_press,
-                on_release=self.on_key_release
-            )
-            self.listener.start()
-            print(f"[ZM] ✅ 头顶对话框监听已启动，支持按键数: {len(self.valid_keys)}")
-        except Exception as e:
-            print(f"[ZM] ❌ 启动失败: {e}")
+class ZMWorker(KeyboardWorker):
+
     
     def get_key_name(self, key):
         """获取按键名称（完整支持小键盘）"""
@@ -239,27 +253,7 @@ class ZMWorker(QObject):
             return special_map.get(key_str, key_str)
         except:
             return None
-    
-    
-    def on_key_press(self, key):
-        key_name = self.get_key_name(key)
-        if key_name and key_name in self.valid_keys:
-            if key_name not in self.pressed_keys:
-                self.pressed_keys.add(key_name)
-                self.key_pressed_signal.emit(key_name)
-    
-    def on_key_release(self, key):
-        key_name = self.get_key_name(key)
-        if key_name and key_name in self.valid_keys:
-            if key_name in self.pressed_keys:
-                self.pressed_keys.remove(key_name)
-                self.key_released_signal.emit(key_name)
-    
-    def stop(self):
-        if self.listener:
-            self.listener.stop()
-    
-    
+        
 
 
 class MouseWorker(QObject):
@@ -376,6 +370,335 @@ class Live2DWidget(QOpenGLWidget):
         self.expression_current_z = 0.0        # 当前Z轴旋转值（平滑过渡）
         
         self.gl_initialized = False
+        
+        #-------表情特殊效果控制
+        self.expressions_config = self.load_expressions_config(model_dir)
+        self.input_disabled = False
+        
+        # ===== 新增：追踪模式配置 =====
+        self.tracking_config = TrackingConfig()  # 默认配置
+        self.current_expression = "expression1"
+        
+        # 追踪状态（平滑过渡用）
+        self.mouse_tracking_x = 0.0  # 当前实际应用的鼠标X权重
+        self.mouse_tracking_y = 0.0  # 当前实际应用的鼠标Y权重
+        self.keyboard_tracking_x = 0.0  # 当前实际应用的键盘X权重
+        self.keyboard_tracking_y = 0.0  # 当前实际应用的键盘Y权重
+        
+        # 过渡速度
+        self.tracking_fade_speed = 0.1
+        
+        #天气
+        self.weather_board = WeatherBoardGL(self)
+        self._init_weather()
+        
+        # 天气定时刷新（30分钟）
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(self._refresh_weather)
+        self.weather_timer.start(30 * 60 * 1000)
+        
+    def _init_weather(self):
+        """初始化天气定位"""
+        try:
+            city, (lat, lon) = ip()
+            self.weather_board.city = city
+            self._weather_lat = lat
+            self._weather_lon = lon
+        except Exception as e:
+            print(f"[Weather] 定位失败: {e}")
+            self.weather_board.city = "北京"
+            self._weather_lat, self._weather_lon = 39.9, 116.4
+        self._refresh_weather()
+
+    def _refresh_weather(self):
+        """刷新天气数据（同时获取当前+预报+逐小时）"""
+        lat, lon = self._weather_lat, self._weather_lon
+        
+        # 获取当前天气 + 3天预报
+        data1 = shuju_1(lat, lon)
+        # 获取逐小时详细数据
+        data2 = shuju_2(lat, lon)
+        
+        current = None
+        daily = None
+        hourly = None
+        
+        if data1 and 'current' in data1:
+            current = data1['current']
+            daily = data1.get('daily')
+            print(f"[Weather] 当前天气已更新: {self.weather_board.city}")
+        else:
+            print("[Weather] 当前天气获取失败")
+        
+        if data2 and 'hourly' in data2:
+            hourly = data2['hourly']
+            print("[Weather] 逐小时数据已更新")
+        else:
+            print("[Weather] 逐小时数据获取失败")
+        
+        # 传给天气板
+        self.weather_board.set_data(self.weather_board.city, current, daily, hourly)
+        self.update()
+
+    def toggle_weather(self):
+        """切换天气显示"""
+        visible = self.weather_board.toggle()
+        self.update()
+        print(f"[Weather] {'显示' if visible else '隐藏'}")
+        return visible
+    
+    def load_expressions_config(self, model_dir):
+        """加载表情行为配置"""
+        config_path = model_dir / "expressions_config.json"
+        default_config = {
+            "expression1": {"disable_input": False, "z_animation": False},
+            "expression2": {"disable_input": True, "z_animation": False},
+            "expression3": {"disable_input": False, "z_animation": False},
+            "expression4": {"disable_input": True, "z_animation": True},
+            "expression5": {"disable_input": False, "z_animation": False},
+            "expression6": {"disable_input": True, "z_animation": True},
+            "expression7": {"disable_input": False, "z_animation": False},
+            "expression8": {"disable_input": True, "z_animation": True},
+        }
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    raw_config = json.load(f)
+                
+                # 转换为新格式
+                converted_config = {}
+                for expr_name, cfg in raw_config.items():
+                    converted = self._convert_to_new_format(cfg)
+                    converted_config[expr_name] = converted
+                
+                print(f"[Expression Config] ✅ 已加载: {config_path}")
+                return converted_config
+                
+            except Exception as e:
+                print(f"[Expression Config] ❌ 加载失败: {e}，使用默认配置")
+        
+        # 转换默认配置
+        converted_default = {}
+        for expr_name, cfg in default_config.items():
+            converted_default[expr_name] = self._convert_to_new_format(cfg)
+        
+        return converted_default
+        
+    def _convert_to_new_format(self, old_cfg):
+        """将旧格式配置转换为新格式"""
+        # 如果已经是新格式，直接返回
+        if 'mouse' in old_cfg or 'keyboard' in old_cfg:
+            return old_cfg
+        
+        # 旧格式转换
+        disable_input = old_cfg.get('disable_input', False)
+        
+        new_cfg = {
+            "disable_input": disable_input,
+            "mouse": {
+                "x": not disable_input,  # 不禁用则默认全开
+                "y": not disable_input
+            },
+            "keyboard": {
+                "x": not disable_input,
+                "y": not disable_input
+            },
+            "z_animation": old_cfg.get('z_animation', False)
+        }
+        
+        return new_cfg
+    
+    def set_expression(self, expr_name):
+        """设置表情并应用追踪配置"""
+        if not self.model:
+            return
+        
+        try:
+            self.model.SetExpression(expr_name)
+            self.current_expression = expr_name
+            
+            # 获取配置
+            cfg = self.expressions_config.get(expr_name, {})
+            
+            # 解析追踪配置
+            self.tracking_config = self._parse_tracking_config(cfg)
+            
+            # 处理Z轴动画
+            if self.tracking_config.z_animation:
+                self.setup_z_animation()
+            else:
+                self.expression_target_z = 0.0
+                self._clear_z_animation()
+            
+            # 兼容旧版变量（用于其他可能依赖它们的代码）
+            self.input_disabled = cfg.get('disable_input', False)
+            self.is_expression2_active = self.input_disabled
+            
+            print(f"[Expression] {expr_name} - 追踪配置: "
+                  f"鼠标XY({self.tracking_config.mouse_x},{self.tracking_config.mouse_y}), "
+                  f"键盘XY({self.tracking_config.keyboard_x},{self.tracking_config.keyboard_y}), "
+                  f"Z动画:{self.tracking_config.z_animation}")
+            
+        except Exception as e:
+            print(f"[Expression] 错误: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _parse_tracking_config(self, cfg):
+        """从配置解析追踪模式"""
+        # 如果有 disable_input: true，全部关闭
+        if cfg.get('disable_input', False):
+            tc = TrackingConfig()
+            tc.mouse_x = False
+            tc.mouse_y = False
+            tc.keyboard_x = False
+            tc.keyboard_y = False
+            tc.z_animation = cfg.get('z_animation', False)
+            return tc
+        
+        # 否则读取详细配置
+        mouse_cfg = cfg.get('mouse', {})
+        keyboard_cfg = cfg.get('keyboard', {})
+        
+        tc = TrackingConfig()
+        tc.mouse_x = mouse_cfg.get('x', True)
+        tc.mouse_y = mouse_cfg.get('y', True)
+        tc.keyboard_x = keyboard_cfg.get('x', True)
+        tc.keyboard_y = keyboard_cfg.get('y', True)
+        tc.z_animation = cfg.get('z_animation', False)
+        
+        return tc
+
+    def paintGL(self):
+        if not self.gl_initialized:
+            return
+        
+        glClearColor(0.0, 0.0, 0.0, 0.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        if not self.model:
+            return
+
+        try:
+            self.update_param_cycle()
+            
+            # ===== 新的追踪系统：平滑过渡各轴权重 =====
+            self._update_tracking_weights()
+            
+            # 应用鼠标追踪（根据各轴独立权重）
+            target_x = self.mouse_x if self.tracking_config.mouse_x else 0
+            target_y = self.mouse_y if self.tracking_config.mouse_y else 0
+            
+            self.target_x += (target_x - self.target_x) * 0.1 * self.mouse_tracking_x
+            self.target_y += (target_y - self.target_y) * 0.1 * self.mouse_tracking_y
+            
+            # 应用键盘/右手追踪（根据各轴独立权重）
+            hand_target_x = self.target_hand_x if self.tracking_config.keyboard_x else 0
+            hand_target_y = self.target_hand_y if self.tracking_config.keyboard_y else 0
+            
+            self.hand_x += (hand_target_x - self.hand_x) * self.hand_delay * self.keyboard_tracking_x
+            self.hand_y += (hand_target_y - self.hand_y) * self.hand_delay * self.keyboard_tracking_y
+            
+            # 未激活的轴平滑归零
+            if not self.tracking_config.mouse_x:
+                self.target_x *= 0.9
+            if not self.tracking_config.mouse_y:
+                self.target_y *= 0.9
+            if not self.tracking_config.keyboard_x:
+                self.hand_x *= 0.9
+            if not self.tracking_config.keyboard_y:
+                self.hand_y *= 0.9
+
+            # 应用参数到模型
+            self.model.SetParameterValue("ParamAngleX", self.target_x * 30, 1.0)
+            self.model.SetParameterValue("ParamAngleY", -self.target_y * 30, 1.0)
+            self.model.SetParameterValue("ParamEyeBallX", self.target_x, 1.0)
+            self.model.SetParameterValue("ParamEyeBallY", -self.target_y, 1.0)
+
+            # Z轴旋转平滑过渡
+            self._update_z_rotation()
+
+            # 应用手部参数
+            self.model.SetParameterValue("Param3", self.hand_y * 30, 1.0)
+            self.model.SetParameterValue("Param2", -self.hand_x * 30, 1.0)
+
+            # Z轴摇摆动画
+            self.update_z_animation()
+            
+            # 右手手势淡出控制
+            self.update_hand_state()
+
+            # 鼠标按键动画
+            self._update_mouse_buttons()
+
+            # 眨眼和绘制
+            self.update_blink()
+            self.update_blink()
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            self.model.Update()
+            self.model.Draw()
+            
+            # 叠加绘制
+            if self.external_hand_opacity > 0.01 and self.current_gesture:
+                self.draw_external_hand()
+            
+            self.update_zm_state()
+            self.draw_zm_bubble()
+
+        except Exception as e:
+            print(f"[PaintGL Error] {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _update_tracking_weights(self):
+        """平滑更新各追踪轴的权重"""
+        # 鼠标X
+        target = 1.0 if self.tracking_config.mouse_x else 0.0
+        self.mouse_tracking_x += (target - self.mouse_tracking_x) * self.tracking_fade_speed
+        
+        # 鼠标Y  
+        target = 1.0 if self.tracking_config.mouse_y else 0.0
+        self.mouse_tracking_y += (target - self.mouse_tracking_y) * self.tracking_fade_speed
+        
+        # 键盘X
+        target = 1.0 if self.tracking_config.keyboard_x else 0.0
+        self.keyboard_tracking_x += (target - self.keyboard_tracking_x) * self.tracking_fade_speed
+        
+        # 键盘Y
+        target = 1.0 if self.tracking_config.keyboard_y else 0.0
+        self.keyboard_tracking_y += (target - self.keyboard_tracking_y) * self.tracking_fade_speed
+    
+    def _update_z_rotation(self):
+        """更新Z轴旋转（平滑过渡）"""
+        z_diff = self.expression_target_z - self.expression_current_z
+        if abs(z_diff) > 0.5:
+            step = 2.0 if z_diff > 0 else -2.0
+            if abs(z_diff) < 2.0:
+                step = z_diff
+            self.expression_current_z += step
+        else:
+            self.expression_current_z = self.expression_target_z
+
+        if abs(self.expression_current_z) > 0.1:
+            self.model.SetParameterValue("ParamAngleZ", self.expression_current_z, 1.0)
+    
+    def _update_mouse_buttons(self):
+        """更新鼠标按键参数（带平滑过渡）"""
+        self.current_mouse_left += (self.target_mouse_left - self.current_mouse_left) * 0.2
+        self.current_mouse_right += (self.target_mouse_right - self.current_mouse_right) * 0.2
+        
+        self.model.SetParameterValue("Param5", self.current_mouse_left * 30, 1.0)
+        self.model.SetParameterValue("Param6", self.current_mouse_right * 30, 1.0)
+    
+    def _clear_z_animation(self):
+        """清理Z轴动画属性"""
+        for attr in ['z_amplitude', 'z_base_frequency', 'z_phase', 'z_last_update',
+                     'z_state', 'z_current_freq', 'z_pause_until',
+                     'z_stop_threshold', 'z_fade_factor', 'z_restore_factor', 'z_pause_prob']:
+            if hasattr(self, attr):
+                delattr(self, attr)
         
     def init_zm_system(self, config):
         """初始化头顶对话框系统（支持多键同时显示）"""
@@ -547,24 +870,22 @@ class Live2DWidget(QOpenGLWidget):
 
         try:
             self.update_param_cycle()
-            
-            # 检查是否为特殊追踪模式
-            is_x_only = self.current_expression == "expression7"
 
-            if not self.is_expression2_active:
-                if is_x_only:
-                    # expression7: 只追踪X轴，Y轴归零
-                    self.target_x += (self.mouse_x - self.target_x) * 0.1
-                    self.target_y = self.target_y * 0.9  # Y轴平滑归零
-                else:
-                    # 正常追踪
-                    self.target_x += (self.mouse_x - self.target_x) * 0.1
-                    self.target_y += (self.mouse_y - self.target_y) * 0.1
+            # 根据 input_disabled 决定是否追踪鼠标
+            if self.input_disabled:
+                # 停止所有追踪，参数平滑归零
+                self.target_x *= 0.8
+                self.target_y *= 0.8
+                self.hand_x *= 0.8
+                self.hand_y *= 0.8
             else:
-                # 停止追踪，强制归零
-                self.target_x = self.target_x * 0.8
-                self.target_y = self.target_y * 0.8
+                # 正常追踪
+                self.target_x += (self.mouse_x - self.target_x) * 0.1
+                self.target_y += (self.mouse_y - self.target_y) * 0.1
+                self.hand_x += (self.target_hand_x - self.hand_x) * self.hand_delay
+                self.hand_y += (self.target_hand_y - self.hand_y) * self.hand_delay
 
+            
             self.model.SetParameterValue("ParamAngleX", self.target_x * 30, 1.0)
             self.model.SetParameterValue("ParamAngleY", -self.target_y * 30, 1.0)
             self.model.SetParameterValue("ParamEyeBallX", self.target_x, 1.0)
@@ -586,7 +907,8 @@ class Live2DWidget(QOpenGLWidget):
             # 应用当前Z轴旋转
             if abs(self.expression_current_z) > 0.1:
                 self.model.SetParameterValue("ParamAngleZ", self.expression_current_z, 1.0)
-
+                
+            is_x_only = (self.current_expression == "expression7")
             # 手部追踪控制
             if not self.is_expression2_active:
                 if is_x_only:
@@ -614,8 +936,11 @@ class Live2DWidget(QOpenGLWidget):
             
             self.model.SetParameterValue("Param5", self.current_mouse_left * 30, 1.0)
             self.model.SetParameterValue("Param6", self.current_mouse_right * 30, 1.0)
+            
+            self.weather_board.draw()
 
             self.update_blink()
+            glColor4f(1.0, 1.0, 1.0, 1.0)
             self.model.Update()
             self.model.Draw()
             
@@ -630,7 +955,10 @@ class Live2DWidget(QOpenGLWidget):
             self.draw_zm_bubble()  # 直接调用，让函数内部判断
 
         except Exception as e:
-            pass
+            print(f"[PaintGL Error] {e}")  # 添加错误输出以便调试
+            import traceback
+            traceback.print_exc()
+            #pass
 
     def update_hand_state(self):
         """更新右手状态"""
@@ -649,6 +977,7 @@ class Live2DWidget(QOpenGLWidget):
         """绘制外部手势（右手）"""
         if not self.current_gesture or self.current_gesture not in self.hand_textures:
             return
+        glPushMatrix()
         
         tex_id = self.hand_textures[self.current_gesture]
         width, height = self.hand_sizes[self.current_gesture]
@@ -675,9 +1004,12 @@ class Live2DWidget(QOpenGLWidget):
         
         glDisable(GL_TEXTURE_2D)
         glColor4f(1.0, 1.0, 1.0, 1.0)
+        glPopMatrix()
 
     def on_zm_key_pressed(self, key):
         """按键按下 - 添加新对话框"""
+        if self.input_disabled:
+            return
         if key not in self.zm_textures:
             print(f"[ZM] 键 '{key}' 没有贴图")
             return
@@ -691,8 +1023,7 @@ class Live2DWidget(QOpenGLWidget):
     def on_zm_key_released(self, key):
         """按键释放 - 开始淡出"""
         # 特殊表情时直接移除
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             if key in self.zm_current_keys:
                 self.zm_current_keys.remove(key)
                 self.zm_opacities.pop(key, None)
@@ -705,8 +1036,7 @@ class Live2DWidget(QOpenGLWidget):
     def update_zm_state(self):
         """更新所有对话框状态"""
         # 特殊表情时强制清空
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             self.zm_current_keys.clear()
             self.zm_opacities.clear()
             self.zm_target_opacities.clear()
@@ -742,12 +1072,12 @@ class Live2DWidget(QOpenGLWidget):
     def draw_zm_bubble(self):
         """绘制所有头顶对话框"""
         # 特殊表情时不显示对话框
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             return
         if not self.zm_current_keys:
             return            
         # 计算起始位置（居中排列）
+        glPushMatrix()
         total = len(self.zm_current_keys)
         start_x = self.zm_offset_x - (total - 1) * self.zm_spacing * self.zm_scale / 2
         
@@ -783,6 +1113,7 @@ class Live2DWidget(QOpenGLWidget):
             glDisable(GL_TEXTURE_2D)
         
         glColor4f(1.0, 1.0, 1.0, 1.0)
+        glPopMatrix()
 
     def update_param_cycle(self):
         current_time = time.time()
@@ -812,68 +1143,39 @@ class Live2DWidget(QOpenGLWidget):
         self.model.SetParameterValue("Param16", param16_value, 1.0)
 
     def update_z_animation(self):
-        """正弦波驱动Z轴旋转，支持平滑减速停止和加速启动（修正版）"""
-        z_animate_exprs = ["expression4", "expression6", "expression8"]
+        if not hasattr(self, 'z_amplitude'):
+            return  # 未启用 Z 动画
 
-        if self.current_expression in z_animate_exprs:
-            current_time = time.time()
-            dt = current_time - getattr(self, 'z_last_update', current_time)
-            self.z_last_update = current_time
-            if dt > 0.1:  # 防止调试中断造成跳跃
-                dt = 0.016
+        current_time = time.time()
+        dt = current_time - self.z_last_update
+        self.z_last_update = current_time
+        if dt > 0.1:
+            dt = 0.016
 
-            # 状态机处理
-            if self.z_state == 'running':
-                # 正常摆动：每帧小概率触发暂停
-                if random.random() < self.z_pause_prob:
-                    self.z_state = 'stopping'
-                    print(f"[Z] {current_time:.2f} 开始减速停止 (当前频率 {self.z_current_freq:.4f})")
+        # 保留原有的状态机逻辑（平滑暂停）
+        if self.z_state == 'running':
+            if random.random() < self.z_pause_prob:
+                self.z_state = 'stopping'
+        elif self.z_state == 'stopping':
+            self.z_current_freq *= self.z_fade_factor
+            if self.z_current_freq < self.z_stop_threshold:
+                self.z_current_freq = 0.0
+                self.z_state = 'paused'
+                self.z_pause_until = current_time + random.uniform(1.0, 2.0)
+        elif self.z_state == 'paused':
+            if current_time >= self.z_pause_until:
+                self.z_state = 'starting'
+                self.z_current_freq = self.z_stop_threshold
+        elif self.z_state == 'starting':
+            self.z_current_freq *= self.z_restore_factor
+            if self.z_current_freq >= self.z_base_frequency:
+                self.z_current_freq = self.z_base_frequency
+                self.z_state = 'running'
 
-            elif self.z_state == 'stopping':
-                # 减速阶段：频率逐渐降低
-                self.z_current_freq *= self.z_fade_factor
-                if self.z_current_freq < self.z_stop_threshold:
-                    # 频率足够低，进入暂停状态
-                    self.z_current_freq = 0.0
-                    self.z_state = 'paused'
-                    pause_duration = random.uniform(1.0, 2.0)
-                    self.z_pause_until = current_time + pause_duration
-                    print(f"[Z] {current_time:.2f} 已停止，暂停至 {self.z_pause_until:.2f}")
-
-            elif self.z_state == 'paused':
-                # 暂停阶段：检查是否结束
-                if current_time >= self.z_pause_until:
-                    self.z_state = 'starting'
-                    # 从很小的非零频率开始加速，避免卡在0
-                    self.z_current_freq = self.z_stop_threshold
-                    print(f"[Z] {current_time:.2f} 暂停结束，开始加速恢复 (起始频率 {self.z_current_freq:.6f})")
-
-            elif self.z_state == 'starting':
-                # 加速阶段：频率逐渐恢复
-                self.z_current_freq *= self.z_restore_factor
-                if self.z_current_freq >= self.z_base_frequency:
-                    self.z_current_freq = self.z_base_frequency
-                    self.z_state = 'running'
-                    print(f"[Z] {current_time:.2f} 恢复正常摆动")
-
-            # 根据当前频率计算角度（暂停时保持原角度）
-            if self.z_state in ('running', 'stopping', 'starting'):
-                # 所有运动状态：相位推进
-                self.z_phase += self.z_current_freq * dt * 2 * math.pi
-                self.expression_target_z = self.z_amplitude * math.sin(self.z_phase)
-                # 限制范围
-                self.expression_target_z = max(-30, min(30, self.expression_target_z))
-            elif self.z_state == 'paused':
-                # 暂停状态：相位不变，角度不变
-                pass  # 维持上一帧的目标角度
-
-        else:
-            # 离开动画表情时，清理相关变量
-            for attr in ['z_amplitude', 'z_base_frequency', 'z_phase', 'z_last_update',
-                         'z_state', 'z_current_freq', 'z_pause_until',
-                         'z_stop_threshold', 'z_fade_factor', 'z_restore_factor', 'z_pause_prob']:
-                if hasattr(self, attr):
-                    delattr(self, attr)
+        if self.z_state in ('running', 'stopping', 'starting'):
+            self.z_phase += self.z_current_freq * dt * 2 * math.pi
+            self.expression_target_z = self.z_amplitude * math.sin(self.z_phase)
+            self.expression_target_z = max(-30, min(30, self.expression_target_z))
 
     def update_blink(self):
         if not self.model:
@@ -911,9 +1213,7 @@ class Live2DWidget(QOpenGLWidget):
 
     def on_key_pressed(self, key):
         """右手按键按下 - 入栈并显示最新手势"""
-        # 特殊表情时不显示手势
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             return
         if key not in self.hand_textures:
             return
@@ -927,8 +1227,7 @@ class Live2DWidget(QOpenGLWidget):
     def on_key_released(self, key):
         """右手按键释放"""
         # 特殊表情时强制清空
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             self.hand_keys_stack.clear()
             self.current_gesture = None
             self.target_external_opacity = 0.0
@@ -945,8 +1244,7 @@ class Live2DWidget(QOpenGLWidget):
     def on_mouse_pressed(self, button):
         """全局鼠标按下"""
         # 特殊表情时不响应鼠标按键动画
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             return
         if button == 'left':
             self.target_mouse_left = 1.0
@@ -956,8 +1254,7 @@ class Live2DWidget(QOpenGLWidget):
     def on_mouse_released(self, button):
         """全局鼠标松开"""
         # 特殊表情时强制归零
-        stop_exprs = ["expression2", "expression4", "expression6", "expression8"]
-        if self.current_expression in stop_exprs:
+        if self.input_disabled:
             self.target_mouse_left = 0.0
             self.target_mouse_right = 0.0
             return
@@ -975,47 +1272,53 @@ class Live2DWidget(QOpenGLWidget):
         self.target_hand_y = max(-1.0, min(1.0, y * 1.2))
 
     def set_expression(self, expr_name):
-        if self.model:
-            try:
-                self.model.SetExpression(expr_name)
-                self.current_expression = expr_name
+        if not self.model:
+            return
+        try:
+            self.model.SetExpression(expr_name)
+            self.current_expression = expr_name
 
-                # 特殊表情控制
-                stop_tracking_exprs = ["expression2", "expression4", "expression6", "expression8"]
-                random_z_exprs = ["expression4", "expression6", "expression8"]
+            # 获取当前表情配置，若不存在则使用 expression1 的配置
+            cfg = self.expressions_config.get(expr_name, self.expressions_config.get("expression1", {}))
 
-                # 设置追踪状态
-                if expr_name in stop_tracking_exprs:
-                    self.is_expression2_active = True  # 复用此变量停止追踪
-                    print(f"[Expression] {expr_name}: 停止所有追踪")
-                elif expr_name == "expression7":
-                    self.is_expression2_active = False
-                    print(f"[Expression] {expr_name}: 只追踪X轴")
-                else:
-                    self.is_expression2_active = False
+            # 1. 处理是否禁用输入
+            self.input_disabled = cfg.get("disable_input", False)
+            # 沿用原有变量名以保持兼容
+            self.is_expression2_active = self.input_disabled
 
-                if expr_name in random_z_exprs:
-                    # 随机振幅（5°~15°）和基准频率（0.2~0.8 Hz）
-                    self.z_amplitude = random.uniform(10, 30)
-                    self.z_base_frequency = random.uniform(0.12, 0.65)
-                    self.z_phase = random.uniform(0, 2 * math.pi)
-                    self.z_last_update = time.time()
-                    
-                    # 状态机变量
-                    self.z_state = 'running'           # 初始为运行状态
-                    self.z_current_freq = self.z_base_frequency  # 当前频率（初始等于基准频率）
-                    self.z_pause_until = 0              # 暂停结束时间戳
-                    self.z_stop_threshold = 0.001       # 频率低于此值视为停止
-                    self.z_fade_factor = 0.95            # 减速系数
-                    self.z_restore_factor = 1.05         # 加速系数
-                    self.z_pause_prob = 0.001            # 每帧触发暂停的概率（0.1%）
-                    
-                    print(f"[Expression] {expr_name} 平滑暂停启动: 振幅={self.z_amplitude:.1f}°, 频率={self.z_base_frequency:.2f} Hz")
-                else:
-                    self.expression_target_z = 0.0
+            # 2. 处理 Z 轴动画
+            if cfg.get("z_animation", False):
+                self.setup_z_animation()
+            else:
+                self.expression_target_z = 0.0
+                # 清理动画属性
+                for attr in ['z_amplitude', 'z_base_frequency', 'z_phase', 'z_last_update',
+                             'z_state', 'z_current_freq', 'z_pause_until',
+                             'z_stop_threshold', 'z_fade_factor', 'z_restore_factor', 'z_pause_prob']:
+                    if hasattr(self, attr):
+                        delattr(self, attr)
 
-            except Exception as e:
-                print(f"[Expression] 错误: {e}")
+            print(f"[Expression] {expr_name} - 输入禁用: {self.input_disabled}, Z动画: {cfg.get('z_animation', False)}")
+
+        except Exception as e:
+            print(f"[Expression] 错误: {e}")
+            
+    def setup_z_animation(self):
+        """初始化 Z 轴动画参数（随机振幅和频率）"""
+        import random, math, time
+        self.z_amplitude = random.uniform(10, 30)
+        self.z_base_frequency = random.uniform(0.12, 0.65)
+        self.z_phase = random.uniform(0, 2 * math.pi)
+        self.z_last_update = time.time()
+        
+        # 状态机变量（保留原有平滑暂停逻辑）
+        self.z_state = 'running'
+        self.z_current_freq = self.z_base_frequency
+        self.z_pause_until = 0
+        self.z_stop_threshold = 0.001
+        self.z_fade_factor = 0.95
+        self.z_restore_factor = 1.05
+        self.z_pause_prob = 0.001
 
     def start_auto_expression(self):
         # 随机选择2-8号表情（1号是默认表情，不用于自动）
@@ -1044,6 +1347,9 @@ class Live2DWidget(QOpenGLWidget):
         self.zm_scale = self.zm_base_scale * scale_factor
         self.zm_offset_x = center_x + (self.zm_base_offset_x - 200) * scale_factor
         self.zm_offset_y = self.zm_base_offset_y * scale_factor
+        
+        # 新增：天气白板缩放
+        self.weather_board.update_scale(scale_factor, window_width, window_height)
 
 
 class MainWindow(QWidget):
@@ -1054,11 +1360,13 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        # 加载主配置
-        self.config = self.load_main_config()
+        #主配置
+        self.config_manager = ConfigManager(APP_PATH)
+        self.config = self.config_manager.main_config
+        self.keybind_config = self.config_manager.keybind_config
         
         # 加载右手按键绑定配置
-        self.keybind_config = self.load_keybind_config()
+        #self.keybind_config = self.load_keybind_config()
         
         self.setWindowTitle("Live2D桌宠 - 头顶对话框版")
         
@@ -1087,21 +1395,31 @@ class MainWindow(QWidget):
         self.timer.timeout.connect(self.update_animation)
         self.timer.start(16)
 
-        self.auto_expr_timer = QTimer(self)
-        self.auto_expr_timer.timeout.connect(self.schedule_auto_expression)
-        self.start_next_auto_expression()
+        self.auto_expr = AutoExpressionScheduler(
+            min_interval_sec=60,
+            max_interval_sec=180,
+            duration_ms=12000,
+            parent=self
+        )
+        self.auto_expr.expression_started.connect(self._on_auto_expression_start)
+        self.auto_expr.expression_ended.connect(self._on_auto_expression_end)
+        self.auto_expr.start()
 
-        # 启动右手监听
+        # 启动监听
+        self.input_manager = InputListenerManager(PYNPUT_AVAILABLE)
         valid_keys = list(self.keybind_config.get('keybinds', {}).keys())
-        self.init_keyboard_listener(valid_keys)
+        self.input_manager = InputListenerManager(PYNPUT_AVAILABLE)
+        self._init_all_listeners()
         
-        # 启动头顶对话框监听
-        self.init_zm_listener()
+        self.is_click_through = False
+        self.is_visible = True
         
-        # 启动鼠标监听
-        self.init_mouse_listener()
+        self.action_weather = QAction("显示天气", self)   # 创建 QAction
+        self.action_weather.setCheckable(True)            # 设为可勾选
+        self.action_weather.triggered.connect(self.toggle_weather)  # 绑定信号
         
-        self.init_tray()
+        #菜单
+        self._init_tray()
         
         self.dragging = False
         self.drag_pos = QPoint()
@@ -1109,138 +1427,57 @@ class MainWindow(QWidget):
         self.right_dragging = False
         self.right_drag_start_y = 0
         self.right_drag_start_scale = 1.0
+        
 
         print("[Window] ✅ 桌宠已启动（头顶对话框版）")
-
-    def load_main_config(self):
-        """加载主配置文件 config.json"""
-        config_path = Path(APP_PATH) / "config.json"
+    #天气    
+    def toggle_weather(self, checked):
+        """托盘菜单切换天气显示"""
+        if hasattr(self, 'gl_widget') and self.gl_widget:
+            visible = self.gl_widget.toggle_weather()
+            self.action_weather.setChecked(visible)
+            print(f"[Tray] 天气{'显示' if visible else '隐藏'}")
+            
+    def set_weather_mode(self, mode):
+        """切换天气显示模式"""
+        if hasattr(self, 'gl_widget') and self.gl_widget:
+            success = self.gl_widget.weather_board.set_mode(mode)
+            if success:
+                # 如果天气隐藏，自动显示
+                if not self.gl_widget.weather_board.visible:
+                    self.gl_widget.toggle_weather()
+                    self.action_weather.setChecked(True)
+                
+                self.gl_widget.update()
+                print(f"[Tray] 天气模式切换为: {mode}")
+                      
+    def _init_all_listeners(self):
+        """统一初始化所有输入监听"""
         
-        default_config = {
-            "paths": {
-                "model_json": "img/AMS/shouer7.model3.json",
-                "physics_json": "img/AMS/shouer7.physics3.json",
-                "moc3_file": "img/AMS/shouer7.moc3",
-                "texture_folder": "img/AMS/shouer7.2048",
-                "hand_folder": "img/AMS/hand",
-                "keybind_json": "img/AMS/keybind.json",
-                "zm_folder": "img/AMS/zm",
-                "zm_keybind_json": "img/AMS/zm_keybind.json",
-                "expressions": [
-                    "img/AMS/expression1.exp3.json",
-                    "img/AMS/expression2.exp3.json",
-                    "img/AMS/expression3.exp3.json",
-                    "img/AMS/expression4.exp3.json",
-                    "img/AMS/expression5.exp3.json",
-                    "img/AMS/expression6.exp3.json",
-                    "img/AMS/expression7.exp3.json",
-                    "img/AMS/expression8.exp3.json"
-                ]
-            }
-        }
+        # 1. 右手按键监听
+        valid_keys = list(self.keybind_config.get('keybinds', {}).keys())
+        if valid_keys:
+            kb_worker = KeyboardWorker(valid_keys)
+            self.input_manager.start(kb_worker, {
+                'key_pressed_signal': self.gl_widget.on_key_pressed,
+                'key_released_signal': self.gl_widget.on_key_released,
+            }, "Keyboard")
         
-        if config_path.exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                print(f"[Config] ✅ 已加载主配置: {config_path}")
-                return config
-            except Exception as e:
-                print(f"[Config] ❌ 加载主配置失败: {e}，使用默认配置")
-        else:
-            print(f"[Config] ⚠️ 未找到主配置文件，创建默认配置")
-            try:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(default_config, f, indent=4, ensure_ascii=False)
-                print(f"[Config] ✅ 已创建默认主配置: {config_path}")
-            except Exception as e:
-                print(f"[Config] ❌ 保存默认配置失败: {e}")
+        # 2. 头顶对话框监听
+        zm_keys = list(self.gl_widget.zm_keybind.get('keybinds', {}).keys())
+        if zm_keys:
+            zm_worker = ZMWorker(zm_keys)
+            self.input_manager.start(zm_worker, {
+                'key_pressed_signal': self.gl_widget.on_zm_key_pressed,
+                'key_released_signal': self.gl_widget.on_zm_key_released,
+            }, "ZM")
         
-        return default_config
-
-    def load_keybind_config(self):
-        """加载右手按键绑定配置"""
-        keybind_path_str = self.config['paths'].get('keybind_json', 'keybind.json')
-        keybind_path = Path(__file__).parent / keybind_path_str
-        
-        default_config = {
-            "keybinds": {
-                "1": {"id": "fist", "file": "1.png"},
-                "2": {"id": "open", "file": "2.png"},
-                "3": {"id": "point", "file": "3.png"},
-                "4": {"id": "peace", "file": "4.png"},
-                "q": {"id": "skill1", "file": "6.png"},
-                "w": {"id": "skill2", "file": "7.png"},
-                "e": {"id": "skill3", "file": "8.png"},
-                "r": {"id": "skill4", "file": "9.png"},
-                "a": {"id": "skill5", "file": "11.png"},
-                "s": {"id": "skill6", "file": "12.png"},
-                "d": {"id": "skill7", "file": "13.png"},
-                "f": {"id": "skill8", "file": "14.png"},
-                "space": {"id": "jump", "file": "10.png"},
-                "tab": {"id": "famp", "file": "0.png"},
-                "shift": {"id": "run", "file": "5.png"}
-            },
-            "settings": {
-                "default_position": {"x": 190, "y": 255},
-                "default_scale": 0.26,
-                "fade_speed": 0.5
-            }
-        }
-        
-        if keybind_path.exists():
-            try:
-                with open(keybind_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                print(f"[Keybind] ✅ 已加载右手配置: {keybind_path}")
-                return config
-            except Exception as e:
-                print(f"[Keybind] ❌ 加载失败: {e}，使用默认配置")
-        
-        return default_config
-
-    def init_keyboard_listener(self, valid_keys):
-        """初始化右手监听"""
-        global PYNPUT_AVAILABLE
-        
-        if not PYNPUT_AVAILABLE:
-            print("[Keyboard] ❌ pynput 未启用")
-            return
-        
-        self.keyboard_worker = KeyboardWorker(valid_keys)
-        self.keyboard_worker.key_pressed_signal.connect(self.gl_widget.on_key_pressed)
-        self.keyboard_worker.key_released_signal.connect(self.gl_widget.on_key_released)
-        
-        self.keyboard_thread = QThread()
-        self.keyboard_worker.moveToThread(self.keyboard_thread)
-        self.keyboard_thread.started.connect(self.keyboard_worker.start_listening)
-        self.keyboard_thread.start()
-
-    def init_zm_listener(self):
-        """初始化头顶对话框监听"""
-        global PYNPUT_AVAILABLE
-        
-        if not PYNPUT_AVAILABLE:
-            print("[ZM] ❌ pynput 未启用")
-            return
-        
-        # 获取对话框按键列表
-        valid_zm_keys = list(self.gl_widget.zm_keybind.get('keybinds', {}).keys())
-        
-        if not valid_zm_keys:
-            print("[ZM] ⚠️ 没有配置对话框按键")
-            return
-        
-        self.zm_worker = ZMWorker(valid_zm_keys)
-        self.zm_worker.key_pressed_signal.connect(self.gl_widget.on_zm_key_pressed)
-        self.zm_worker.key_released_signal.connect(self.gl_widget.on_zm_key_released)
-        
-        self.zm_thread = QThread()
-        self.zm_worker.moveToThread(self.zm_thread)
-        self.zm_thread.started.connect(self.zm_worker.start_listening)
-        self.zm_thread.start()
-
-    def init_mouse_listener(self):
+        # 3. 全局鼠标监听
+        mouse_worker = MouseWorker()
+        self.input_manager.start(mouse_worker, {
+            'mouse_pressed_signal': self.gl_widget.on_mouse_pressed,
+            'mouse_released_signal': self.gl_widget.on_mouse_released,
+        }, "Mouse")
         """初始化全局鼠标监听"""
         global PYNPUT_AVAILABLE
         
@@ -1257,142 +1494,75 @@ class MainWindow(QWidget):
         self.mouse_thread.started.connect(self.mouse_worker.start_listening)
         self.mouse_thread.start()
 
-    def start_next_auto_expression(self):
-        next_interval = random.randint(60, 180) * 1000
-        self.auto_expr_timer.start(next_interval)
-
-    def schedule_auto_expression(self):
-        self.auto_expr_timer.stop()
-        self.gl_widget.start_auto_expression()
-        QTimer.singleShot(12000, self.end_auto_expression)
-
-    def end_auto_expression(self):
+    def _on_auto_expression_start(self, expr_name: str):
+        """自动表情触发"""
+        self.gl_widget.start_auto_expression()  # 内部会设置随机表情
+    
+    def _on_auto_expression_end(self):
+        """自动表情结束，恢复默认"""
         self.gl_widget.stop_auto_expression()
-        self.start_next_auto_expression()
-
-    def init_tray(self):
-        self.tray = QSystemTrayIcon(self)
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setBrush(QColor(255, 182, 193))
-        painter.drawEllipse(4, 4, 24, 24)
-        painter.end()
-
-        self.tray.setIcon(QIcon(pixmap))
-        self.tray.setToolTip("Live2D桌宠")
-
-        menu = QMenu()
+    
+    def manual_set_expression(self, expr_name: str):
+        """手动设置表情（托盘菜单或右键调用）"""
+        self.auto_expr.manual_override()  # 中断自动流程
+        self.gl_widget.is_auto_expression_active = False
+        self.gl_widget.set_expression(expr_name)
+    
+    #菜单
+    def _init_tray(self):
+        """初始化托盘（委托给 TrayManager）"""
+        self.tray_manager = TrayManager(self)
         
-        # === 在这里添加隐藏/显示开关 ===
-        self.action_visible = QAction("隐藏", self)  # 初始状态是显示中，所以显示"隐藏"
-        self.action_visible.triggered.connect(self.toggle_visible)
-        menu.addAction(self.action_visible)
-        
-        # 添加穿透开关
-        self.action_click_through = QAction("鼠标穿透", self)
-        self.action_click_through.setCheckable(True)
-        self.action_click_through.setChecked(False)
-        self.action_click_through.triggered.connect(self.toggle_click_through)
-        menu.addAction(self.action_click_through)
-        menu.addAction(self.action_visible)
-        
-        menu.addSeparator()
-        
-        expr_menu = menu.addMenu("表情")
-        expr_list = ["expression1", "expression2", "expression3", "expression4", 
-                   "expression5", "expression6", "expression7", "expression8"]
-        for expr in expr_list:
-            act = QAction(expr, self)
-            act.triggered.connect(lambda checked, e=expr: self.manual_set_expression(e))
-            expr_menu.addAction(act)
-
-        menu.addSeparator()
-        
-        action_reset_scale = QAction("重置大小", self)
-        action_reset_scale.triggered.connect(self.reset_scale)
-        menu.addAction(action_reset_scale)
-        
-        action_pat = QAction("摸摸头", self)
-        action_pat.triggered.connect(self.on_pat)
-        menu.addAction(action_pat)
-
-        action_quit = QAction("退出", self)
-        action_quit.triggered.connect(self.quit)
-        menu.addAction(action_quit)
-
-        self.tray.setContextMenu(menu)
-        self.tray.show()
-        
-        self.is_click_through = False
-        self.is_visible = True
-        
+        # 连接信号到 MainWindow 的方法
+        self.tray_manager.toggle_visible_requested.connect(self.toggle_visible)
+        self.tray_manager.toggle_click_through_requested.connect(self.toggle_click_through)
+        self.tray_manager.toggle_weather_requested.connect(self._on_toggle_weather)
+        self.tray_manager.weather_mode_changed.connect(self.set_weather_mode)
+        self.tray_manager.expression_selected.connect(self.manual_set_expression)
+        self.tray_manager.reset_scale_requested.connect(self.reset_scale)
+        self.tray_manager.pat_requested.connect(self.on_pat)
+        self.tray_manager.quit_requested.connect(self.quit)
+    
+    def _on_toggle_weather(self):
+        """托盘切换天气（包装一下同步状态）"""
+        visible = self.gl_widget.toggle_weather()
+        self.tray_manager.set_weather_checked(visible)
+    
     def toggle_visible(self):
-        """切换窗口隐藏/显示状态（修复与穿透的冲突）"""
+        """切换窗口隐藏/显示"""
         if self.is_visible:
-            # 当前是显示状态，要隐藏
             self.hide()
             self.is_visible = False
-            self.action_visible.setText("显示")
-            print("[Tray] 窗口已隐藏")
+            self.tray_manager.set_visible_text("显示")
         else:
-            # 当前是隐藏状态，要显示
-            # 根据穿透状态恢复正确的窗口标志
             if self.is_click_through:
-                # 恢复穿透状态
-                self.setWindowFlags(
-                    Qt.Window |
-                    Qt.WindowStaysOnTopHint |
-                    Qt.FramelessWindowHint |
-                    Qt.WindowTransparentForInput |
-                    Qt.Tool
-                )
-                print("[Tray] 窗口显示（穿透模式）")
+                self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | 
+                                  Qt.FramelessWindowHint | Qt.WindowTransparentForInput | Qt.Tool)
             else:
-                # 恢复普通状态
-                self.setWindowFlags(
-                    Qt.Window |
-                    Qt.WindowStaysOnTopHint |
-                    Qt.FramelessWindowHint |
-                    Qt.Tool
-                )
-                print("[Tray] 窗口显示（普通模式）")
-            
+                self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | 
+                                  Qt.FramelessWindowHint | Qt.Tool)
             self.show()
             self.setAttribute(Qt.WA_TranslucentBackground, True)
             self.is_visible = True
-            self.action_visible.setText("隐藏")
+            self.tray_manager.set_visible_text("隐藏")
     
     def toggle_click_through(self, checked):
-        """切换鼠标穿透状态"""
+        """切换鼠标穿透"""
         self.is_click_through = checked
+        self.tray_manager.set_click_through_checked(checked)
         
-        # 如果窗口当前是隐藏的，只更新状态，不操作窗口
         if not self.is_visible:
-            print(f"[穿透] {'✅ 已开启' if checked else '❌ 已关闭'}（窗口隐藏中，将在显示时生效）")
             return
         
         if checked:
-            self.setWindowFlags(
-                Qt.Window |
-                Qt.WindowStaysOnTopHint |
-                Qt.FramelessWindowHint |
-                Qt.WindowTransparentForInput |
-                Qt.Tool
-            )
-            print("[穿透] ✅ 已开启 - 点击穿透桌面")
+            self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | 
+                              Qt.FramelessWindowHint | Qt.WindowTransparentForInput | Qt.Tool)
         else:
-            self.setWindowFlags(
-                Qt.Window |
-                Qt.WindowStaysOnTopHint |
-                Qt.FramelessWindowHint |
-                Qt.Tool
-            )
-            print("[穿透] ❌ 已关闭 - 可以拖动")
-        
+            self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | 
+                              Qt.FramelessWindowHint | Qt.Tool)
         self.show()
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-    
+          
     def reset_scale(self):
         """重置窗口大小"""
         self.current_scale = 1.0
@@ -1415,12 +1585,6 @@ class MainWindow(QWidget):
                 self.gl_widget.model.Resize(new_width, new_height)
             except:
                 pass
-
-    def manual_set_expression(self, expr_name):
-        self.auto_expr_timer.stop()
-        self.gl_widget.is_auto_expression_active = False
-        self.gl_widget.set_expression(expr_name)
-        self.start_next_auto_expression()
 
     def update_animation(self):
         self.gl_widget.update()
@@ -1518,66 +1682,21 @@ class MainWindow(QWidget):
             self.gl_widget.model.SetParameterValue("ParamAngleY", -15, 1.0)
             QTimer.singleShot(300, lambda: self.gl_widget.model.SetParameterValue("ParamAngleY", 0, 1.0))
 
+    #监听
     def quit(self):
-        # 停止右手监听
-        if hasattr(self, 'keyboard_worker'):
-            self.keyboard_worker.stop()
-        if hasattr(self, 'keyboard_thread'):
-            self.keyboard_thread.quit()
-            self.keyboard_thread.wait()
+        # 停止所有输入监听（一行替代原来9行）
+        self.input_manager.stop_all()
         
-        # 停止头顶对话框监听
-        if hasattr(self, 'zm_worker'):
-            self.zm_worker.stop()
-        if hasattr(self, 'zm_thread'):
-            self.zm_thread.quit()
-            self.zm_thread.wait()
-        
-        # 停止鼠标监听
-        if hasattr(self, 'mouse_worker'):
-            self.mouse_worker.stop()
-        if hasattr(self, 'mouse_thread'):
-            self.mouse_thread.quit()
-            self.mouse_thread.wait()
+        # 天气清理
+        if hasattr(self, 'gl_widget') and self.gl_widget:
+            self.gl_widget.weather_board.cleanup()
         
         try:
             live2d.dispose()
         except:
             pass
         QApplication.quit()
-
+ 
     def closeEvent(self, event):
         self.quit()
         event.accept()
-
-
-def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    print("=" * 60)
-    print("🖱️  鼠标跟踪: 眼睛跟随鼠标")
-    print("✋ 右手手势: 1,2,3,4, q,w,e,r, a,s,d,f, space, shift, tab")
-    print("💬 头顶对话框: 按任意字母/数字/功能键显示")
-    print("🔍 右键拖动: 放大/缩小")
-    print("=" * 60)
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()
-
-
-with open('/mnt/kimi/output/AMS_final.py', 'w', encoding='utf-8') as f:
-    f.write(complete_code)
-
-print("✅ 完整的 AMS.py 已保存为 AMS_final.py")
-print("\n主要功能：")
-print("1. ✋ 右手手势系统（原有）")
-print("2. 💬 头顶对话框系统（新增）- 按下任意键显示在角色头顶")
-print("3. 🖱️ 鼠标跟踪")
-print("4. 😊 表情系统")
-print("\n头顶对话框特点：")
-print("- 位置：角色头顶 (x:200, y:80)")
-print("- 显示时长：0.5秒后自动淡出")
-print("- 支持43个按键：0-9, a-z, esc, tab, capslock, shift, ctrl, alt, space")

@@ -8,6 +8,7 @@
         "keybind_json": "img/AMS/keybind.json",
         "zm_folder": "img/AMS/zm",
         "zm_keybind_json": "img/AMS/zm_keybind.json",
+        "expressions_config.json": "img/AMS/expressions_config.json",
         "expressions": [
             "img/AMS/expression1.exp3.json",
             "img/AMS/expression2.exp3.json",

@@ -1,0 +1,46 @@
+{
+    "expression1": {
+        "comment": "默认状态，全部开启",
+        "mouse": {"x": true, "y": true},
+        "keyboard": {"x": true, "y": true},
+        "z_animation": false
+    },
+    "expression2": {
+        "comment": "完全静止",
+        "disable_input": true,
+        "z_animation": false
+    },
+    "expression3": {
+        "comment": "只动鼠标X轴",
+        "mouse": {"x": true, "y": false},
+        "keyboard": {"x": true, "y": true},
+        "z_animation": false
+    },
+    "expression4": {
+        "comment": "静止但摇摆",
+        "disable_input": true,
+        "z_animation": true
+    },
+    "expression5": {
+        "comment": "只动鼠标Y轴，键盘关闭",
+        "mouse": {"x": false, "y": true},
+        "keyboard": {"x": false, "y": false},
+        "z_animation": false
+    },
+    "expression6": {
+        "comment": "静止但摇摆",
+        "disable_input": true,
+        "z_animation": true
+    },
+    "expression7": {
+        "comment": "键盘只动X轴",
+        "mouse": {"x": true, "y": true},
+        "keyboard": {"x": true, "y": false},
+        "z_animation": false
+    },
+    "expression8": {
+        "comment": "静止但摇摆",
+        "disable_input": true,
+        "z_animation": true
+    }
+}
