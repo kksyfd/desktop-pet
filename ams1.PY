@@ -5,6 +5,13 @@
 import sys
 print(f"[Python] 版本: {sys.version}")
 print(f"[Python] 路径: {sys.executable}")
+from pathlib import Path
+
+# 将根目录、AI3.2、ui、services 都加入搜索路径
+root_dir = Path(__file__).resolve().parent
+for sub in [root_dir, root_dir / "AI3.2", root_dir / "ui", root_dir / "services", root_dir / "gongneng"]:
+    if str(sub) not in sys.path:
+        sys.path.insert(0, str(sub))
 
 import os
 import math
@@ -18,6 +25,10 @@ from peizhi import ConfigManager
 from jianting import InputListenerManager
 from caidan import TrayManager
 from dingshi import AutoExpressionScheduler
+from control_panel import ControlPanel   # 因为 AI3.2 已在 sys.path
+from chat_window import ChatWindow       # ui 已在 sys.path
+from services import get_ai_manager
+from format_converter_emis import FormatConverterEmis
 
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
 
@@ -1408,7 +1419,6 @@ class MainWindow(QWidget):
         # 启动监听
         self.input_manager = InputListenerManager(PYNPUT_AVAILABLE)
         valid_keys = list(self.keybind_config.get('keybinds', {}).keys())
-        self.input_manager = InputListenerManager(PYNPUT_AVAILABLE)
         self._init_all_listeners()
         
         self.is_click_through = False
@@ -1417,6 +1427,16 @@ class MainWindow(QWidget):
         self.action_weather = QAction("显示天气", self)   # 创建 QAction
         self.action_weather.setCheckable(True)            # 设为可勾选
         self.action_weather.triggered.connect(self.toggle_weather)  # 绑定信号
+        
+        # ===== 新增：控制面板 & AI 服务 =====
+        self.control_panel = None
+        self.chat_window = None
+        self.converter_window = None
+        self.ai_manager = get_ai_manager()
+        self.ai_manager.init_finished.connect(self._on_ai_ready)
+        self.ai_manager.progress.connect(self._on_ai_progress)
+        # ===== 新增：初始化 AI 模型管理器 =====
+        self.ai_manager.init_model_manager()  # 初始化 SoVITS 模型管理器
         
         #菜单
         self._init_tray()
@@ -1430,6 +1450,105 @@ class MainWindow(QWidget):
         
 
         print("[Window] ✅ 桌宠已启动（头顶对话框版）")
+        
+    def _open_control_panel(self):
+        """打开控制面板"""
+        
+        # ========== 情况1：面板已存在，直接显示 ==========
+        if self.control_panel is not None:
+            self.control_panel.show()
+            self.control_panel.raise_()
+            self.control_panel.activateWindow()
+            return
+        
+        # ========== 情况2：首次创建面板 ==========
+        self.control_panel = ControlPanel(parent=None)
+        
+        # === 注入模型管理器（必须在连接信号之前）===
+        self.control_panel.set_model_manager(self.ai_manager.get_model_manager())
+        
+        # === 连接所有信号（只连一次！）===
+        # 基础控制
+        self.control_panel.signals.toggle_visible.connect(self.toggle_visible)
+        self.control_panel.signals.toggle_click_through.connect(self.toggle_click_through)
+        self.control_panel.signals.reset_scale.connect(self.reset_scale)
+        self.control_panel.signals.pat.connect(self.on_pat)
+        self.control_panel.signals.toggle_weather.connect(self._on_toggle_weather)
+        self.control_panel.signals.set_expression.connect(self.manual_set_expression)
+        self.control_panel.signals.open_chat.connect(self._open_chat_window)
+        self.control_panel.signals.quit_app.connect(self.quit)
+        self.control_panel.signals.open_converter.connect(self._open_converter)
+        self.control_panel.signals.ai_switch_toggled.connect(self.toggle_ai_service)
+        
+        # TTS 模型切换（新增）
+        self.control_panel.signals.tts_preset_changed.connect(
+            lambda name: self.ai_manager.get_model_manager().switch_preset(name)
+        )
+        # TTS 实时参数调节（新增）
+        self.control_panel.signals.tts_params_changed.connect(
+            self.ai_manager.update_tts_params
+        )
+        
+        # 同步当前状态
+        self.control_panel.update_visible_state(self.is_visible)
+        self.control_panel.update_click_through_state(self.is_click_through)
+        
+        # 启动 AI 服务
+        if not self.ai_manager.is_ready and not self.ai_manager.is_loading:
+            self.control_panel.set_chat_enabled(False)
+            self.control_panel.set_status("AI 服务启动中...", "loading")
+            self.ai_manager.start_init()
+        elif self.ai_manager.is_ready:
+            self.control_panel.set_chat_enabled(True)
+            self.control_panel.set_status("AI 服务已就绪")
+        
+        self.control_panel.show()
+    
+    def _on_ai_ready(self, success: bool, message: str):
+        """AI 初始化完成"""
+        if self.control_panel:
+            self.control_panel.set_chat_enabled(success)
+            status_type = "normal" if success else "error"
+            self.control_panel.set_status(message, status_type)
+    
+    def _on_ai_progress(self, msg: str):
+        """AI 初始化进度"""
+        if self.control_panel:
+            self.control_panel.set_status(msg, "loading")
+    
+    def _open_chat_window(self):
+        """打开对话窗口"""
+        if not self.ai_manager.is_ready:
+            print("[Chat] AI 未就绪")
+            return
+        
+        chat_fn = self.ai_manager.get_chat_fn()
+        tts_fn = self.ai_manager.get_tts_fn()
+        
+        if not chat_fn:
+            return
+        
+        if self.chat_window is not None:
+            self.chat_window.show()
+            self.chat_window.raise_()
+            self.chat_window.activateWindow()
+            return
+        self.chat_window = ChatWindow(chat_fn=chat_fn, tts_fn=tts_fn, parent=None)
+        self.chat_window.setAttribute(Qt.WA_DeleteOnClose, False)  # 关闭时不自动删除
+        self.chat_window.show()
+        
+    def _open_converter(self):
+        """打开格式转换终端"""
+        if self.converter_window is not None:
+            self.converter_window.show()
+            self.converter_window.raise_()
+            self.converter_window.activateWindow()
+            return
+
+        from format_converter_emis import FormatConverterEmis
+        self.converter_window = FormatConverterEmis(parent=None)
+        self.converter_window.show()
+    
     #天气    
     def toggle_weather(self, checked):
         """托盘菜单切换天气显示"""
@@ -1478,21 +1597,7 @@ class MainWindow(QWidget):
             'mouse_pressed_signal': self.gl_widget.on_mouse_pressed,
             'mouse_released_signal': self.gl_widget.on_mouse_released,
         }, "Mouse")
-        """初始化全局鼠标监听"""
-        global PYNPUT_AVAILABLE
         
-        if not PYNPUT_AVAILABLE:
-            print("[Mouse] ❌ pynput 未启用")
-            return
-        
-        self.mouse_worker = MouseWorker()
-        self.mouse_worker.mouse_pressed_signal.connect(self.gl_widget.on_mouse_pressed)
-        self.mouse_worker.mouse_released_signal.connect(self.gl_widget.on_mouse_released)
-        
-        self.mouse_thread = QThread()
-        self.mouse_worker.moveToThread(self.mouse_thread)
-        self.mouse_thread.started.connect(self.mouse_worker.start_listening)
-        self.mouse_thread.start()
 
     def _on_auto_expression_start(self, expr_name: str):
         """自动表情触发"""
@@ -1522,6 +1627,7 @@ class MainWindow(QWidget):
         self.tray_manager.reset_scale_requested.connect(self.reset_scale)
         self.tray_manager.pat_requested.connect(self.on_pat)
         self.tray_manager.quit_requested.connect(self.quit)
+        self.tray_manager.open_control_panel_requested.connect(self._open_control_panel)
     
     def _on_toggle_weather(self):
         """托盘切换天气（包装一下同步状态）"""
@@ -1684,6 +1790,21 @@ class MainWindow(QWidget):
 
     #监听
     def quit(self):
+        if hasattr(self, 'auto_expr'):
+            self.auto_expr.stop()
+            self.auto_expr.deleteLater()
+        if self.control_panel:
+            self.control_panel.close()
+            self.control_panel = None
+        if self.chat_window:
+            #停止播放
+            self.chat_window.player.stop()
+            #删除
+            deleted = self.chat_window.clear_voices()
+            print(f"[Quit] 已清理 {deleted} 个音频文件")
+            #关闭
+            self.chat_window.close()
+            self.chat_window = None
         # 停止所有输入监听（一行替代原来9行）
         self.input_manager.stop_all()
         
@@ -1696,7 +1817,43 @@ class MainWindow(QWidget):
         except:
             pass
         QApplication.quit()
+        
+    def toggle_ai_service(self, enabled: bool):
+        """AI 总开关"""
+        if enabled:
+            if not self.ai_manager.is_ready and not self.ai_manager.is_loading:
+                self.ai_manager.start_init()
+                self.control_panel.set_ai_switch_enabled(False)
+                if not hasattr(self, '_ai_switch_ready_conn'):
+                    self._ai_switch_ready_conn = self.ai_manager.init_finished.connect(
+                        lambda s, msg: self.control_panel.set_ai_switch_enabled(True)
+                    )
+            else:
+                if self.control_panel:
+                    self.control_panel.set_chat_enabled(True)
+        else:
+            if self._is_ai_busy():
+                print("[AI] 任务处理中，无法关闭 AI，请稍后重试")
+                self.control_panel.set_ai_switch_checked(True)
+                return
+            self.ai_manager.stop()
+            if self.chat_window:
+                self.chat_window.close()
+                self.chat_window = None
+            if self.control_panel:
+                self.control_panel.set_chat_enabled(False)
+                self.control_panel.set_status("AI 已关闭", "normal")
+
+    def _is_ai_busy(self) -> bool:
+        """检测 AI 是否正忙（生成回复或合成语音）"""
+        if self.chat_window and hasattr(self.chat_window, 'is_busy'):
+            return self.chat_window.is_busy()
+        return False
  
     def closeEvent(self, event):
-        self.quit()
+        if hasattr(self, 'chat_window') and self.chat_window:
+            # 先停止播放器，再清理文件
+            self.chat_window.player.stop()
+            self.chat_window.clear_voices()
+            # 不需要调用 close()，因为窗口会随主程序退出而销毁
         event.accept()

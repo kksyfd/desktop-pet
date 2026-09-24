@@ -2,6 +2,7 @@ import ams1 as a
 import sys
 def main():
     app = a.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)   # 添加这一行
     window = a.MainWindow()
     window.show()
     print("=" * 60)

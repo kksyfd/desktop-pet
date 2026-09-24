@@ -1,0 +1,20 @@
+{
+  "presets": {
+    "默认配置": {
+      "name": "默认配置",
+      "gpt_weight": "D:\\zhuo3.0\\GPT-SoVITS-v2pro-20250604\\GPT_weights_v2Pro\\AMS1-v2pro-e15.ckpt",
+      "sovits_weight": "D:\\zhuo3.0\\GPT-SoVITS-v2pro-20250604\\SoVITS_weights_v2Pro\\AMS1_v2Pro_e8_s536.pth",
+      "ref_audio_path": "D:/zhuo3.0/cs2/cl/AMS.wav_0000000000_0000178240.wav",
+      "ref_audio_text": "飞行雪绒这个名字一听就知道，是因为雪绒海豹起的吧。",
+      "ref_audio_lang": "zh",
+      "target_lang": "zh",
+      "temperature": 0.85,
+      "top_k": 22,
+      "top_p": 0.8,
+      "repetition_penalty": 1.3,
+      "speed_factor": 1.0,
+      "text_split_method": "cut2"
+    }
+  },
+  "current_preset": "默认配置"
+}

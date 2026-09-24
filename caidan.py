@@ -15,6 +15,7 @@ class TrayManager(QObject):
     reset_scale_requested = pyqtSignal()
     pat_requested = pyqtSignal()
     quit_requested = pyqtSignal()
+    open_control_panel_requested = pyqtSignal()  # 新增
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,6 +51,13 @@ class TrayManager(QObject):
         self.action_click_through.setChecked(False)
         self.action_click_through.triggered.connect(self.toggle_click_through_requested.emit)
         self.menu.addAction(self.action_click_through)
+        
+        self.menu.addSeparator()
+        
+        # ===== 新增：控制面板 =====
+        self.action_panel = QAction("🎛️ 打开控制面板", self.menu)
+        self.action_panel.triggered.connect(self.open_control_panel_requested.emit)
+        self.menu.addAction(self.action_panel)
         
         self.menu.addSeparator()
         
@@ -107,7 +115,7 @@ class TrayManager(QObject):
             action.triggered.connect(lambda checked, e=expr: self.expression_selected.emit(e))
             expr_menu.addAction(action)
     
-    # ========== 状态同步方法（MainWindow 调用这些来更新UI）==========
+    # ========== 状态同步方法 ==========
     
     def set_visible_text(self, text: str):
         """切换显示/隐藏文字"""

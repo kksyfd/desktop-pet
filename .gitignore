@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+_internal/
+build/
+dist/
+*.spec
+.venv/
+venv/
+桌宠.exe
+*.exe
